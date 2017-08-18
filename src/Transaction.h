@@ -1,4 +1,4 @@
-/* Copyright (c) 2015 Stanford University
+/* Copyright (c) 2015-2017 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -62,21 +62,25 @@ class Transaction {
     void read(uint64_t tableId, const void* key, uint16_t keyLength,
             Buffer* value);
 
+    bool readIfExists(uint64_t tableId, const void* key, uint16_t keyLength,
+            Buffer* value);
+
     void remove(uint64_t tableId, const void* key, uint16_t keyLength);
 
     void write(uint64_t tableId, const void* key, uint16_t keyLength,
             const void* buf, uint32_t length);
 
     /**
-     * Encapsulates the state of a Transaction::read operation,
+     * Encapsulates the state of a Transaction::readIfExists operation,
      * allowing it to execute asynchronously.
      */
-    class ReadOp {
-      public:
-        ReadOp(Transaction* transaction, uint64_t tableId, const void* key,
-               uint16_t keyLength, Buffer* value, bool batch = false);
+    class ReadIfExistsOp {
+      PUBLIC:
+        ReadIfExistsOp(Transaction* transaction, uint64_t tableId,
+                const void* key, uint16_t keyLength, Buffer* value,
+                bool batch = false);
         bool isReady();
-        void wait();
+        bool wait();
 
       PRIVATE:
         Transaction* transaction;       /// Pointer to associated transaction.
@@ -113,6 +117,20 @@ class Transaction {
         };
         Tub<BatchedRequest> batchedRequest; // Use Tub to prevent misuse.
 
+        DISALLOW_COPY_AND_ASSIGN(ReadIfExistsOp);
+    };
+
+    /**
+     * Encapsulates the state of a Transaction::read operation,
+     * allowing it to execute asynchronously.
+     */
+    class ReadOp : public ReadIfExistsOp {
+      PUBLIC:
+        ReadOp(Transaction* transaction, uint64_t tableId, const void* key,
+               uint16_t keyLength, Buffer* value, bool batch = false);
+        void wait();
+
+      PRIVATE:
         DISALLOW_COPY_AND_ASSIGN(ReadOp);
     };
 

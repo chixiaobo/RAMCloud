@@ -1,4 +1,4 @@
-/* Copyright (c) 2015 Stanford University
+/* Copyright (c) 2015-2017 Stanford University
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -123,8 +123,40 @@ void
 Transaction::read(uint64_t tableId, const void* key, uint16_t keyLength,
         Buffer* value)
 {
-    ReadOp readOp(this, tableId, key, keyLength, value);
-    readOp.wait();
+    ReadOp op(this, tableId, key, keyLength, value);
+    op.wait();
+}
+
+/**
+ * Read the current contents of an object as part of this transaction and
+ * indicate if the object exists.
+ *
+ * This method is functionally equivalent to Transaction::read except it will
+ * not throw an exception when an object doesn't exist.  Instead, the method
+ * returns false.  This method is useful when trying to avoid the cost of
+ * exception handling.
+ *
+ * \param tableId
+ *      The table containing the desired object (return value from
+ *      a previous call to getTableId).
+ * \param key
+ *      Variable length key that uniquely identifies the object within tableId.
+ *      It does not necessarily have to be null terminated.
+ * \param keyLength
+ *      Size in bytes of the key.
+ * \param[out] value
+ *      After a successful return, this Buffer will hold the
+ *      contents of the desired object - only the value portion of the object.
+ *
+ * \return
+ *      True if the object exists; false otherwise.
+ */
+bool
+Transaction::readIfExists(uint64_t tableId, const void* key, uint16_t keyLength,
+        Buffer* value)
+{
+    ReadIfExistsOp op(this, tableId, key, keyLength, value);
+    return op.wait();
 }
 
 /**
@@ -212,10 +244,10 @@ Transaction::write(uint64_t tableId, const void* key, uint16_t keyLength,
 }
 
 /**
- * Constructor for Transaction::ReadOp: initiates a read just like
- * #Transaction::read, but returns once the operation has been initiated,
- * without waiting for it to complete.  The operation is not consider part of
- * the transaction until it is waited on.
+ * Constructor for Transaction::ReadIfExistsOp: initiates a read just like
+ * #Transaction::ReadIfExistsOp, but returns once the operation has been
+ * requested, without waiting for it to complete.  The operation is not consider
+ * part of the transaction until it is waited on.
  *
  * \param transaction
  *      The Transaction object of which this operation is a part.
@@ -234,8 +266,9 @@ Transaction::write(uint64_t tableId, const void* key, uint16_t keyLength,
  *      True if this operation can be batched trading latency for throughput.
  *      Defaults to false.
  */
-Transaction::ReadOp::ReadOp(Transaction* transaction, uint64_t tableId,
-        const void* key, uint16_t keyLength, Buffer* value, bool batch)
+Transaction::ReadIfExistsOp::ReadIfExistsOp(Transaction* transaction,
+        uint64_t tableId, const void* key, uint16_t keyLength, Buffer* value,
+        bool batch)
     : transaction(transaction)
     , tableId(tableId)
     , keyBuf()
@@ -288,19 +321,19 @@ Transaction::ReadOp::ReadOp(Transaction* transaction, uint64_t tableId,
 }
 
 /**
- * Indicates whether a response has been received for this ReadOp and thus
- * whether #wait will not block.  Used for asynchronous processing of RPCs.
- * Checking that an ReadOp isReady does not include the operation in the
+ * Indicates whether a response has been received for this ReadIfExistsOp and
+ * thus whether #wait will not block.  Used for asynchronous processing of RPCs.
+ * Checking that an ReadIfExistsOp isReady does not include the operation in the
  * transaction (see #wait).
  *
- * For a batched ReadOp, calling isReady will also trigger the execution of
- * the batch.
+ * For a batched ReadIfExistsOp, calling isReady will also trigger the execution
+ * of the batch.
  *
  * \return
- *      True if ReadOp #wait will not block; false otherwise.
+ *      True if ReadIfExistsOp #wait will not block; false otherwise.
  */
 bool
-Transaction::ReadOp::isReady()
+Transaction::ReadIfExistsOp::isReady()
 {
     if (!requestBatched) {
         assert(singleRequest);
@@ -333,9 +366,12 @@ Transaction::ReadOp::isReady()
  * transaction until wait is called (e.g. if commit is called before wait,
  * this operation will not be included).  Behavior when calling wait more than
  * once is undefined.
+ *
+ * \return
+ *      True if the object exists; false otherwise.
  */
-void
-Transaction::ReadOp::wait()
+bool
+Transaction::ReadIfExistsOp::wait()
 {
     if (expect_false(transaction->commitStarted)) {
         throw TxOpAfterCommit(HERE);
@@ -402,22 +438,65 @@ Transaction::ReadOp::wait()
             // Object did not exists at the time of the read so remember to
             // reject (abort) the transaction if it does exist.
             entry->rejectRules.exists = true;
-            throw ObjectDoesntExistException(HERE);
+            return false;
         }
 
     } else if (entry->type == ClientTransactionTask::CacheEntry::REMOVE) {
         // Read after remove; object would no longer exist.
-        throw ObjectDoesntExistException(HERE);
+        return false;
     } else if (entry->type == ClientTransactionTask::CacheEntry::READ
             && entry->rejectRules.exists) {
         // Read after read resulting in object DNE; object still DNE.
-        throw ObjectDoesntExistException(HERE);
+        return false;
     }
 
     uint32_t dataLength;
     const void* data = entry->objectBuf.getValue(&dataLength);
     value->reset();
     value->appendCopy(data, dataLength);
+    return true;
+}
+
+/**
+ * Constructor for Transaction::ReadOp: initiates a read just like
+ * #Transaction::read, but returns once the operation has been initiated,
+ * without waiting for it to complete.  The operation is not consider part of
+ * the transaction until it is waited on.
+ *
+ * \param transaction
+ *      The Transaction object of which this operation is a part.
+ * \param tableId
+ *      The table containing the desired object (return value from
+ *      a previous call to getTableId).
+ * \param key
+ *      Variable length key that uniquely identifies the object within tableId.
+ *      It does not necessarily have to be null terminated.
+ * \param keyLength
+ *      Size in bytes of the key.
+ * \param[out] value
+ *      After a successful return, this Buffer will hold the
+ *      contents of the desired object - only the value portion of the object.
+ * \param batch
+ *      True if this operation can be batched trading latency for throughput.
+ *      Defaults to false.
+ */
+Transaction::ReadOp::ReadOp(Transaction* transaction, uint64_t tableId,
+        const void* key, uint16_t keyLength, Buffer* value, bool batch)
+    : ReadIfExistsOp(transaction, tableId, key, keyLength, value, batch)
+{}
+
+/**
+ * Wait for the operation to complete.  The operation is not part of the
+ * transaction until wait is called (e.g. if commit is called before wait,
+ * this operation will not be included).  Behavior when calling wait more than
+ * once is undefined.
+ */
+void
+Transaction::ReadOp::wait()
+{
+    if (!Transaction::ReadIfExistsOp::wait()) {
+        throw ObjectDoesntExistException(HERE);
+    }
 }
 
 } // namespace RAMCloud
